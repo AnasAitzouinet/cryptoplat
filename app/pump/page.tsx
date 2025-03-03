@@ -92,7 +92,7 @@ const HomePage = () => {
       amount: 0.1,
       denominatedInSol: "true",
       slippage: 0.5,
-      priorityFee: 0.0001,
+      priorityFee: 0.0002,
       pool: "pump",
     };
     await wsClient.sendPumpTransaction(tradeRequest, phantomWallet!);
