@@ -1,22 +1,29 @@
 "use client";
 import { useEffect, useState } from "react";
-import { TokenEvent, WebSocketClientOP, TradeRequest } from "@/lib/Websocket";
+import { TokenEvent, WebSocketClientOP, TradeRequest, PhantomWallet } from "@/lib/Websocket";
 import { Button } from "@/components/ui/button";
+import Image from "next/image";
+ 
+
+declare global {
+  interface Window {
+    solana?: PhantomWallet;
+  }
+}
 
 const HomePage = () => {
   const [tokens, setTokens] = useState<TokenEvent[]>([]);
-  const [phantomWallet, setPhantomWallet] = useState<any>(null);
+  const [phantomWallet, setPhantomWallet] = useState<PhantomWallet | null>(null);
   const [wsClient, setWsClient] = useState<WebSocketClientOP | null>(null);
 
   // Try to auto-reconnect if wallet info exists in localStorage
   useEffect(() => {
-    if (typeof window !== "undefined" && (window as any).solana && (window as any).solana.isPhantom) {
+    if (typeof window !== "undefined" && window.solana && window.solana.isPhantom) {
       const storedWallet = localStorage.getItem('phantomWallet');
       if (storedWallet) {
-        // Phantom wallets require user approval, so we call connect automatically if possible.
-        (window as any).solana.connect({ onlyIfTrusted: true })
-          .then((res: any) => {
-            setPhantomWallet((window as any).solana);
+        window.solana.connect({ onlyIfTrusted: true })
+          .then((res) => {
+            setPhantomWallet(window.solana!);
             console.log("Auto reconnected to Phantom:", res.publicKey.toString());
           })
           .catch(() => {
@@ -28,11 +35,10 @@ const HomePage = () => {
 
   // Connect to Phantom Wallet manually
   const handleConnectWallet = async () => {
-    if (typeof window !== "undefined" && (window as any).solana && (window as any).solana.isPhantom) {
+    if (typeof window !== "undefined" && window.solana && window.solana.isPhantom) {
       try {
-        const response = await (window as any).solana.connect();
-        setPhantomWallet((window as any).solana);
-        // Save wallet connection info to localStorage
+        const response = await window.solana.connect();
+        setPhantomWallet(window.solana);
         localStorage.setItem(
           "phantomWallet",
           JSON.stringify({ publicKey: response.publicKey.toString(), connected: true })
@@ -57,9 +63,8 @@ const HomePage = () => {
     client.addListener(handleNewToken);
     client.connect();
 
-    // Wait for connection then subscribe to new tokens.
     const connectInterval = setInterval(() => {
-      if (client && (client as any)["isConnected"]) {
+      if (client && client["isConnected"]) {
         client.subscribeToNewTokens();
         clearInterval(connectInterval);
       }
@@ -72,7 +77,6 @@ const HomePage = () => {
     };
   }, []);
 
-  // Quick trade handler using a token's data
   const handleQuickTrade = async (token: TokenEvent) => {
     if (!phantomWallet) {
       alert("Please connect your Phantom wallet to trade.");
@@ -85,16 +89,15 @@ const HomePage = () => {
     const tradeRequest: TradeRequest = {
       action: "buy",
       mint: token.mint,
-      amount: 0.1, // You can adjust this default
+      amount: 0.1,
       denominatedInSol: "true",
       slippage: 0.5,
       priorityFee: 0.0001,
       pool: "pump",
     };
-    await wsClient.sendPumpTransaction(tradeRequest, phantomWallet);
+    await wsClient.sendPumpTransaction(tradeRequest, phantomWallet!);
   };
 
-  // Quick Buy: Automatically trade the most recent token without user input.
   const handleQuickBuy = async () => {
     if (!phantomWallet) {
       alert("Please connect your Phantom wallet to trade.");
@@ -104,12 +107,10 @@ const HomePage = () => {
       alert("WebSocket client not ready.");
       return;
     }
-    // If tokens list is empty, alert the user.
     if (tokens.length === 0) {
       alert("No tokens available for quick buy.");
       return;
     }
-    // For example, use the most recent token received
     const latestToken = tokens[tokens.length - 1];
     const tradeRequest: TradeRequest = {
       action: "buy",
@@ -142,10 +143,12 @@ const HomePage = () => {
               className="bg-white p-4 rounded-lg shadow mb-4 flex items-center"
             >
               {(token.metadata?.image || token.uri) && (
-                <img
+                <Image
                   src={token.metadata?.image || token.uri}
                   alt={token.name}
-                  className="w-12 h-12 rounded-full mr-4"
+                  width={48}
+                  height={48}
+                  className="rounded-full mr-4"
                   onError={(e) => {
                     (e.target as HTMLImageElement).style.display = "none";
                   }}

@@ -46,6 +46,16 @@ export interface TradeRequest {
     pool: "pump" | "raydium" | "auto";
 }
 
+ 
+
+
+export interface PhantomWallet {
+    isPhantom: boolean;
+    connect: (options?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: { toString: () => string } }>;
+    publicKey?: { toString: () => string };
+    signTransaction: (tx: VersionedTransaction) => Promise<VersionedTransaction>;
+
+  }
 export class WebSocketClientOP {
     private ws: WebSocket | null = null;
     private messageQueue: { method: SubscriptionMethod; keys?: string[] }[] = [];
@@ -141,12 +151,13 @@ export class WebSocketClientOP {
         }
     }
 
-    private validateTokenEvent(data: any): data is TokenEvent {
+    private validateTokenEvent(data: unknown): data is TokenEvent {
         return (
             !!data &&
-            typeof data.signature === "string" &&
-            typeof data.mint === "string" &&
-            typeof data.name === "string"
+            typeof data === 'object' &&
+            'signature' in data && typeof data.signature === "string" &&
+            'mint' in data && typeof data.mint === "string" &&
+            'name' in data && typeof data.name === "string"
         );
     }
 
@@ -182,7 +193,7 @@ export class WebSocketClientOP {
      * @param request Trade details.
      * @param phantomWallet Optional Phantom wallet object (window.solana).
      */
-    async sendPumpTransaction(request: TradeRequest, phantomWallet?: any): Promise<void> {
+    async sendPumpTransaction(request: TradeRequest, phantomWallet?: PhantomWallet): Promise<void> {
         // Use the wallet's public key if connected
         const publicKey = phantomWallet?.publicKey?.toString();
         if (!publicKey) {
@@ -211,17 +222,18 @@ export class WebSocketClientOP {
             const data = await response.arrayBuffer();
             const tx = VersionedTransaction.deserialize(new Uint8Array(data));
             // Set the fee payer to the connected wallet
-            //   @ts-ignore
+            // @ts-expect-error - feePayer is not exposed in the type definition
             tx.message.feePayer = new PublicKey(publicKey);
             try {
                 // Ask Phantom wallet to sign the transaction
-                const signedTx = await phantomWallet.signTransaction(tx);
+                const signedTx = await phantomWallet!.signTransaction(tx);
                 const signature = await this.connection.sendRawTransaction(signedTx.serialize(), {
                     preflightCommitment: "processed",
                 });
                 console.log("Transaction submitted: https://solscan.io/tx/" + signature);
-            } catch (e: any) {
-                console.error("Error signing or sending transaction:", e.message);
+            } catch (e: unknown) {
+                const error = e instanceof Error ? e : new Error(String(e));
+                console.error("Error signing or sending transaction:", error.message);
             }
         } else {
             console.error("Error generating transaction:", response.statusText);
