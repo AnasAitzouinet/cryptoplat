@@ -82,26 +82,26 @@ const HomePage = () => {
         };
     }, []);
 
-    const handleQuickTrade = async (token: TokenEvent) => {
-        if (!phantomWallet) {
-            alert("Please connect your Phantom wallet to trade.");
-            return;
-        }
-        if (!wsClient) {
-            alert("WebSocket client not ready.");
-            return;
-        }
-        const tradeRequest: TradeRequest = {
-            action: "buy",
-            mint: token.mint,
-            amount: 0.001,
-            denominatedInSol: "true",
-            slippage: 0.5,
-            priorityFee: 0.0001,
-            pool: "pump",
-        };
-        await wsClient.sendPumpTransaction(tradeRequest, phantomWallet!);
+  const handleQuickTrade = async (token: TokenEvent) => {
+    if (!phantomWallet) {
+      alert("Please connect your Phantom wallet to trade.");
+      return;
+    }
+    if (!wsClient) {
+      alert("WebSocket client not ready.");
+      return;
+    }
+    const tradeRequest: TradeRequest = {
+      action: "buy",
+      mint: token.mint,
+      amount: 0.1,
+      denominatedInSol: "true",
+      slippage: 0.5,
+      priorityFee: 0.0001,
+      pool: "pump",
     };
+    await wsClient.sendPumpTransaction(tradeRequest, phantomWallet!);
+  };
 
     const handleLightTrade = async (token: TokenEvent) => {
 
