@@ -1,5 +1,6 @@
 "use client";
-import { VersionedTransaction, Connection, PublicKey } from "@solana/web3.js";
+import { VersionedTransaction, Connection, PublicKey, Keypair } from "@solana/web3.js";
+import bs58 from 'bs58'
 
 export type SubscriptionMethod =
     | "subscribeNewToken"
@@ -46,7 +47,7 @@ export interface TradeRequest {
     pool: "pump" | "raydium" | "auto";
 }
 
- 
+
 
 
 export interface PhantomWallet {
@@ -54,8 +55,10 @@ export interface PhantomWallet {
     connect: (options?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: { toString: () => string } }>;
     publicKey?: { toString: () => string };
     signTransaction: (tx: VersionedTransaction) => Promise<VersionedTransaction>;
+    signAndSendTransaction: (tx : VersionedTransaction) => Promise<string>;
+}
 
-  }
+
 export class WebSocketClientOP {
     private ws: WebSocket | null = null;
     private messageQueue: { method: SubscriptionMethod; keys?: string[] }[] = [];
@@ -64,7 +67,7 @@ export class WebSocketClientOP {
     private reconnectAttempts = 0;
     private readonly maxReconnectAttempts = 5;
     private metadataCache: Record<string, TokenMetadata> = {};
-    private readonly RPC_URL = "https://api.devnet-beta.solana.com";
+    private readonly RPC_URL = "https://api.devnet.solana.com";
     private connection: Connection = new Connection(this.RPC_URL, "confirmed");
 
     constructor(private readonly url: string) { }
@@ -169,6 +172,10 @@ export class WebSocketClientOP {
         this.send({ method: "subscribeAccountTrade", keys: accountKeys });
     }
 
+    unsubscribeNewToken(): void {
+        this.send({ method: "unsubscribeNewToken" });
+    }
+
     private send(payload: { method: SubscriptionMethod; keys?: string[] }): void {
         if (this.isConnected && this.ws) {
             this.ws.send(JSON.stringify(payload));
@@ -237,6 +244,62 @@ export class WebSocketClientOP {
             }
         } else {
             console.error("Error generating transaction:", response.statusText);
+        }
+    }
+
+    async sendLightTransaction(request: TradeRequest) {
+        try {
+            // Use environment variable for API key
+            const apiKey = process.env.API_KEY;
+            if (!apiKey) {
+                throw new Error("API_KEY environment variable is not set");
+            }
+
+            const response = await fetch(`https://pumpportal.fun/api/trade?api-key=${apiKey}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    action: request.action,
+                    mint: request.mint,
+                    amount: request.amount,
+                    denominatedInSol: request.denominatedInSol,
+                    slippage: request.slippage,
+                    priorityFee: request.priorityFee,
+                    pool: request.pool
+                })
+            });
+
+            if (response.status === 200) {
+                const data = await response.arrayBuffer();
+                const tx = VersionedTransaction.deserialize(new Uint8Array(data));
+                
+                // Use environment variable for private key
+                const privateKey = process.env.WALLET_PRIVATE_KEY;
+                if (!privateKey) {
+                    throw new Error("WALLET_PRIVATE_KEY environment variable is not set");
+                }
+                
+                const signerKeyPair = Keypair.fromSecretKey(bs58.decode(privateKey));
+                tx.sign([signerKeyPair]);
+                const signature = await this.connection.sendTransaction(tx);
+                console.log("Transaction: https://solscan.io/tx/" + signature);
+            } else {
+                console.error("Error generating transaction:", response.statusText);
+            }
+        } catch (error) {
+            console.error("Error sending light transaction:", error);
+        }
+    }
+
+    async fetchWalletBalance(publicKey: string): Promise<number> {
+        try {
+            const balance = await this.connection.getBalance(new PublicKey(publicKey));
+            return balance / 10 ** 9;
+        } catch (error) {
+            console.error("Error fetching wallet balance:", error);
+            return 0;
         }
     }
 
