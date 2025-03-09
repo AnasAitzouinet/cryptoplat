@@ -5,7 +5,8 @@ import { ThemeProvider } from "@/components/providers/theme-provider"
 
 
 const lexend = Lexend_Deca({
-  weight: ["100", "200", "300", "400", "500", "600", "700", "800", "900"]
+  weight: ["100", "200", "300", "400", "500", "600", "700", "800", "900"],
+  subsets: ["latin"],
 })
 
 export const metadata: Metadata = {

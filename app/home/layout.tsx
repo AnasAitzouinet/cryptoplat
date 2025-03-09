@@ -1,32 +1,33 @@
-"use client";
-import React, { useState } from 'react'
+import React  from 'react'
 import { AppSidebar } from "@/components/app-sidebar"
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb"
-import { Separator } from "@/components/ui/separator"
+ 
 import {
   SidebarInset,
   SidebarProvider,
-  SidebarTrigger,
 } from "@/components/ui/sidebar"
-
+import { auth } from '@/lib/auth'
+import { headers } from 'next/headers'
 
 interface Props {
   children: React.ReactNode
 }
 
-export default function layout({ children }: Props) {
-  
+export default async function Layout({ children }: Props) {
+  const session = await auth.api.getSession({
+    headers: await headers()
+  })
+
+  if (!session) {
+    return (
+      <div>
+        <h1>Not authenticated</h1>
+      </div>
+    )
+  }
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
+      <SidebarInset className='overflow-hidden'>
         {children}
       </SidebarInset>
     </SidebarProvider>

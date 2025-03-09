@@ -1,79 +1,124 @@
 "use client";
-import { useEffect, useState } from "react";
-import { TokenEvent, WebSocketClientOP, TradeRequest, PhantomWallet } from "@/lib/Websocket";
-import { Button } from '@/components/ui/button'
-import { ChevronDown, ExternalLink, Maximize2, Settings, Wallet, Zap } from 'lucide-react'
-import { motion } from 'framer-motion'
-import { TokenCard } from '@/components/_components/token-card'
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { OwnedToken, PumpFunTokens, TokenEvent, TradeRequest } from "@/lib/Pump";
+import { getUserWallet } from "@/server/Auth";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { OwnedTokenCard, TokenCard } from '@/components/_components/token-card';
+import { useDebounce } from "@/hooks/useDebounce";
+import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { set } from "@coral-xyz/anchor/dist/cjs/utils/features";
+interface SolanaWindow {
+  solana?: {
+    isPhantom?: boolean;
+    publicKey?: string;
+    connected?: boolean;
+  };
+}
 
+declare global {
+  interface Window extends SolanaWindow {}
+}
 
 export default function HomePage() {
   const [tokens, setTokens] = useState<TokenEvent[]>([]);
-  const [phantomWallet, setPhantomWallet] = useState<PhantomWallet | null>(null);
-  const [wsClient, setWsClient] = useState<WebSocketClientOP | null>(null);
+  const [Ownedtokens, setOwnedTokens] = useState<OwnedToken[]>([]);
+  const [wsClient, setWsClient] = useState<PumpFunTokens | null>(null);
+  const [quickBuyAmount, setQuickBuyAmount] = useState<string>("0.1");
+  const [balance, setBalance] = useState<number>(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
 
-  // Try to auto-reconnect if wallet info exists in localStorage
+  const debouncedQuickBuyAmount = useDebounce(quickBuyAmount, 500);
+
+  // Initialize client and subscribe to tokens
   useEffect(() => {
-    if (typeof window !== "undefined" && window.solana && window.solana.isPhantom) {
-      const storedWallet = localStorage.getItem('phantomWallet');
-      if (storedWallet) {
-        window.solana.connect({ onlyIfTrusted: true })
-          .then((res) => {
-            setPhantomWallet(window.solana!);
-            console.log("Auto reconnected to Phantom:", res.publicKey.toString());
-          })
-          .catch(() => {
-            console.log("User not trusted or wallet not connected yet.");
-          });
-      }
-    }
-  }, []);
+    const client = new PumpFunTokens("wss://pumpportal.fun/api/data");
 
-  // Connect to Phantom Wallet manually
-  const handleConnectWallet = async () => {
-    if (typeof window !== "undefined" && window.solana && window.solana.isPhantom) {
-      try {
-        const response = await window.solana.connect();
-        console.log(response);
-        setPhantomWallet(window.solana);
-        localStorage.setItem(
-          "phantomWallet",
-          JSON.stringify({ publicKey: response.publicKey.toString(), connected: true })
-        );
-        console.log("Connected to Phantom:", response.publicKey.toString());
-      } catch (err) {
-        console.error("Phantom connection error:", err);
-        localStorage.removeItem("phantomWallet");
-      }
-    } else {
-      alert("Phantom Wallet not found. Please install it.");
-      localStorage.removeItem("phantomWallet");
-    }
-  };
+    client.onConnectionStatusChange((status) => {
+      setConnectionStatus(status);
+    });
 
-  useEffect(() => {
-    const client = new WebSocketClientOP("wss://pumpportal.fun/api/data");
     setWsClient(client);
+    const fetchdev = async () => {
+      try {
+        const devtoken = await client.getOwnedTokens();
+        const formattedTokens = devtoken.map(token => ({
+          mint: token.mint,
+          amount: token.amount,
+          metadata: {
+            createdOn: token.metadata?.createdOn || '',
+            description: token.metadata?.description || '',
+            image: token.metadata?.image || '',
+            name: token.metadata?.name || '',
+            showName: token.metadata?.showName || false,
+            symbol: token.metadata?.symbol || '',
+            twitter: token.metadata?.twitter || ''
+          }
+        }));
+        setOwnedTokens((prev) => {
+          return [...formattedTokens, ...prev].slice(0, 20);
+        });
+      }
+      catch (error) {
+        console.error("Error fetching dev token data:", error);
+      }
+    }
+
+    fetchdev();
+
     const handleNewToken = (token: TokenEvent) => {
-      console.log("New token:", token);
-      setTokens((prev) => [...prev, token]);
+      setTokens((prevTokens) => {
+        if (prevTokens.some(t => t.signature === token.signature)) {
+          return prevTokens;
+        }
+
+        const updatedTokens = [token, ...prevTokens].slice(0, 20);
+        localStorage.setItem("lastSeenTokens", JSON.stringify(updatedTokens));
+        return updatedTokens;
+      });
     };
+
     client.addListener(handleNewToken);
     client.connect();
 
+    // Fetch balance immediately after connection
+    const fetchBalance = async () => {
+      try {
+        const userData = await getUserWallet();
+        if (userData?.publicKey) {
+          const bal = await client.BallanceOfWallet(userData.publicKey);
+          console.log("Balance fetched:", bal);
+          setBalance(bal / LAMPORTS_PER_SOL);
+        }
+      } catch (error) {
+        console.error("Balance fetch error:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     const connectInterval = setInterval(() => {
-      if (client && client["isConnected"]) {
+      if (client.isConnected()) {
         client.subscribeToNewTokens();
+        fetchBalance();
         clearInterval(connectInterval);
       }
-    }, 100);
+    }, 1000);
 
-    client.fetchWalletBalance("6kVvfjFnchSRwjGMw2HKRRmKCiqzzWpToHS1WoU83Woh").then((res) => {
-      console.log("Wallet balance:", res);
-    });
+    try {
+      const storedTokens = localStorage.getItem("lastSeenTokens");
+      if (storedTokens) {
+        setTokens(JSON.parse(storedTokens));
+      }
+    } catch (err) {
+      console.error("Error parsing stored tokens:", err);
+    }
+
+    const storedQuickBuy = localStorage.getItem("quickBuyAmount");
+    if (storedQuickBuy) {
+      setQuickBuyAmount(storedQuickBuy);
+    }
 
     return () => {
       client.removeListener(handleNewToken);
@@ -82,253 +127,197 @@ export default function HomePage() {
     };
   }, []);
 
+  // Save quickBuy amount to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem("quickBuyAmount", debouncedQuickBuyAmount);
+  }, [debouncedQuickBuyAmount]);
 
+  // Handle token trading
+  const handleTrade = useCallback(
+    async (token: TokenEvent) => {
+      if (!wsClient) {
+        alert("Connection not established. Please refresh.");
+        return;
+      }
 
+      const tradeAmount = parseFloat(quickBuyAmount);
+      if (isNaN(tradeAmount) || tradeAmount <= 0) {
+        alert("Please enter a valid amount greater than 0");
+        return;
+      }
+
+      try {
+        const tradeRequest: TradeRequest = {
+          action: "buy",
+          mint: token.mint,
+          amount: tradeAmount,
+          denominatedInSol: "true",
+          slippage: 0.005,
+          priorityFee: 0.0002,
+          pool: "pump",
+        };
+
+        const result = await wsClient.Trade(tradeRequest);
+        console.log("Trade result:", result);
+        if (!result.success) {
+          throw new Error(result.error?.toString() || "Trade failed");
+        }
+
+        setTimeout(async () => {
+          const userData = await getUserWallet();
+          if (userData?.walletPublicKey) {
+            const bal = await wsClient.BallanceOfWallet(userData.walletPublicKey);
+            setBalance(bal);
+          }
+        }, 2000);
+      } catch (error) {
+        console.error("Trade error:", error);
+        alert("Transaction failed. Please try again.");
+      }
+    },
+    [wsClient, quickBuyAmount]
+  );
+
+  const handleTransfer = async () => {
+    if (!wsClient) {
+      alert("Connection not established. Please refresh.");
+      return;
+    }
+
+    const transferAmount = parseFloat(quickBuyAmount);
+    if (isNaN(transferAmount) || transferAmount <= 0) {
+      alert("Please enter a valid amount greater than 0");
+      return;
+    }
+
+    try {
+      const res = await wsClient.exportFundsToPhantom(transferAmount);
+      console.log("Transfer result:", res);
+      return res;
+    } catch (error) {
+      console.error("Transfer error:", error);
+      alert("Transaction failed. Please try again.");
+    }
+  }
+
+  // Memoized token cards to reduce re-renders
+  const tokenCards = useMemo(
+    () =>
+      tokens.slice(0, 50).map((token, index) => (
+        <TokenCard
+          key={token.signature || `token-${index}`}
+          {...token}
+          quickBuy={quickBuyAmount}
+          handleTrade={() => handleTrade(token)}
+        />
+      )),
+    [tokens, quickBuyAmount, handleTrade]
+  );
+
+  const OwnedTokenCards = useMemo(
+    () =>
+      Ownedtokens.map((token, index) => (
+        <OwnedTokenCard
+          key={token.mint || `token-${index}`}
+          {...token}
+          quickSell={quickBuyAmount}
+          handleTrade={() =>console.log("Sell", token.mint, "Amount:", quickBuyAmount)}
+        />
+      )),
+    [Ownedtokens, quickBuyAmount, handleTrade]
+  );
   return (
     <>
-      <header className="flex h-16 w-full justify-end items-center gap-6 pt-5 px-5">
-        <div className="flex size-full justify-between items-center mb-4">
-          <h1 className="text-xl font-bold">Bolt</h1>
-          
-
-            <div className="*:not-first:mt-2 cursor-pointer ">
-               <div className="flex rounded-full shadow-xs">
-                <span className=" w-full  justify-center text-white   inline-flex items-center rounded-s-full border px-3 text-sm">
-                 Quick Buy
-                </span>
-                <Input
-                  id={"id"}
-                  className="-ms-px rounded-s-none text-center rounded-e-full shadow-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                  placeholder="0.0 SOL"
-                  type="number"
-                  min="0"
-                  onInput={(e) => {
-                    if (e.currentTarget.value < "0") {
-                      e.currentTarget.value = "0";
-                    }
-                  }}
-                />
-          
-            </div>
-
+      <header className="flex flex-col sm:flex-row h-auto sm:h-16 w-full justify-between sm:justify-end items-start sm:items-center gap-4 sm:gap-6 pt-5 px-4 sm:px-5">
+        <div className="flex flex-col gap-1 sm:gap-2 w-full sm:w-auto">
+          <span className="text-sm">Wallet Balance (SOL)</span>
+          <span className="text-lg font-medium">
+            {isLoading ? "Loading..." : balance }
+          </span>
+        </div>
+        <div className="flex flex-col gap-1 sm:gap-2 w-full sm:w-auto">
+          <span className="text-sm">Quick Buy Amount (SOL)</span>
+          <div className="flex gap-2 items-center">
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={quickBuyAmount}
+              onChange={(e) => {
+                const value = parseFloat(e.target.value);
+                if (!isNaN(value) && value >= 0) {
+                  setQuickBuyAmount(e.target.value);
+                  localStorage.setItem("quickBuyAmount", e.target.value);
+                }
+              }}
+              placeholder="0.0"
+              className="w-full sm:w-32"
+            />
+            <Button
+              onClick={handleTransfer}
+              variant="outline"
+              className="whitespace-nowrap"
+              disabled={!quickBuyAmount || parseFloat(quickBuyAmount) <= 0}
+            >
+              Transfer {quickBuyAmount} SOL
+            </Button>
           </div>
+        </div>
+        <div className="flex flex-col gap-1 sm:gap-2 w-full sm:w-auto">
+          <span className="text-sm">Public Key</span>
+          <Button
+            variant="outline"
+            className="whitespace-nowrap"
+            onClick={async () => {
+              const userData = await getUserWallet();
+              if (userData?.publicKey) {
+                navigator.clipboard.writeText(userData.publicKey);
+                alert('Public key copied to clipboard!');
+              } else {
+                alert('No public key found');
+              }
+            }}
+          >
+            Copy Public Key
+          </Button>
         </div>
       </header>
 
-      <div className="grid grid-cols-3 size-full  gap-4 p-5 pt-0  ">
-
-
-        <div className="border border-gray-800 rounded-xl overflow-hidden h-[calc(100vh-6rem)] flex flex-col">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4 sm:p-5 pt-0">
+        <div className="border border-gray-800 rounded-xl overflow-hidden h-[calc(100vh-12rem)] sm:h-[calc(100vh-6rem)] flex flex-col">
           <div className="flex justify-between items-center p-2 border-b border-gray-800 bg-[#1a1a1c]">
-            <h2 className="font-medium">New Pairs</h2>
-            <Button variant="ghost" size="icon" className="h-6 w-6 text-gray-400">
-              <Maximize2 className="h-4 w-4" />
-            </Button>
-          </div>
-          <ScrollArea className="h-full w-full">
-            <div className="p-2 space-y-3">
-              {[...tokens].reverse().map((token, index) => (
-                <motion.div
-                  key={index}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, delay: index * 0.05 }}
-                  className="w-full"
-                >
-                  <TokenCard
-                    name={token.name}
-                    mint={token.mint}
-                    solAmount={token.solAmount}
-                    marketCapSol={token.marketCapSol}
-                    metadata={token.metadata}
-                    uri={token.uri}
-                    txType={token.txType}
-                    symbol={token.symbol}
-                    pool={token.pool}
-                    traderPublicKey={token.traderPublicKey}
-                    signature={token.signature}
-                    initialBuy={token.initialBuy}
-                    boundingCurveKey={token.boundingCurveKey}
-                    vTokensInBoundingCurve={token.vTokensInBoundingCurve}
-                  />
-                </motion.div>
-              ))}
-              <div className="h-20 w-full left-0 bg-gradient-to-t from-black via-black/40 to-transparent absolute bottom-0"></div>
+            <h2 className="font-medium text-sm sm:text-base">New Pairs</h2>
+            <div className="text-xs text-gray-400">
+              {connectionStatus === 'connected' ? 'Live' :
+                connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
             </div>
-          </ScrollArea>
-        </div>
-
-        {/* <div className="border  border-gray-800 rounded-xl overflow-hidden">
-          <div className="flex justify-between items-center p-2 border-b border-gray-800 bg-[#1a1a1c]">
-            <h2 className="font-medium">New Pairs</h2>
-            <Button variant="ghost" size="icon" className="h-6 w-6 text-gray-400">
-              <Maximize2 className="h-4 w-4" />
-            </Button>
           </div>
-          <div className="space-y-3 p-2">
-            <TokenCard
-              name="pweanut"
-              fullName="pweanut"
-              time="0s"
-              price="$0"
-              marketCap="$4K"
-              stats={[
-                { label: "0%", color: "text-green-500" },
-                { label: "0%", color: "text-green-500" },
-                { label: "0%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="1"
-            />
-
-            <TokenCard
-              name="WHEAT"
-              fullName="WHEAT Economy"
-              time="1s"
-              price="$330"
-              marketCap="$5K"
-              stats={[
-                { label: "8%", color: "text-green-500" },
-                { label: "4%", color: "text-green-500" },
-                { label: "8%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="4"
-            />
-
-            <TokenCard
-              name="childs"
-              fullName="Judge Kim Childs"
-              time="3s"
-              price="$434"
-              marketCap="$5K"
-              stats={[
-                { label: "10%", color: "text-green-500" },
-                { label: "7%", color: "text-green-500" },
-                { label: "10%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="3"
-            />
-
-            <TokenCard
-              name="livemison"
-              fullName="For the life of my son"
-              time="5s"
-              price="$326"
-              marketCap="$5K"
-              stats={[
-                { label: "5%", color: "text-green-500" },
-                { label: "7%", color: "text-green-500" },
-                { label: "8%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="3"
-            />
-
-            <TokenCard
-              name="Weld"
-              fullName="Tig"
-              time="6s"
-              price="$391"
-              marketCap="$4K"
-              stats={[
-                { label: "5%", color: "text-green-500" },
-                { label: "3%", color: "text-green-500" },
-                { label: "5%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="5"
-            />
+          <div className="p-1 sm:p-2 space-y-2 sm:space-y-3 overflow-y-auto">
+            {tokens.length > 0 ? tokenCards : (
+              <div className="text-center text-gray-400 py-4">
+                Waiting for new tokens...
+              </div>
+            )}
+          </div>
+          
+        </div>
+        <div className="border border-gray-800 rounded-xl overflow-hidden h-[calc(100vh-12rem)] sm:h-[calc(100vh-6rem)] flex flex-col">
+          <div className="flex justify-between items-center p-2 border-b border-gray-800 bg-[#1a1a1c]">
+            <h2 className="font-medium text-sm sm:text-base">Owned</h2>
+            <div className="text-xs text-gray-400">
+              {connectionStatus === 'connected' ? 'Live' :
+                connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
+            </div>
+          </div>
+          <div className="p-1 sm:p-2 space-y-2 sm:space-y-3 overflow-y-auto">
+            {Ownedtokens.length > 0 ? OwnedTokenCards : (
+              <div className="text-center text-gray-400 py-4">
+                {isLoading ? 'Loading Your tokens...' : 'You don\'t own any tokens yet'}
+              </div>
+            )}
           </div>
         </div>
-
-        <div className="border  border-gray-800 rounded-xl overflow-hidden">
-          <div className="flex justify-between items-center p-2 border-b border-gray-800 bg-[#1a1a1c]">
-            <h2 className="font-medium">New Pairs</h2>
-            <Button variant="ghost" size="icon" className="h-6 w-6 text-gray-400">
-              <Maximize2 className="h-4 w-4" />
-            </Button>
-          </div>
-          <div className="space-y-3 p-2">
-            <TokenCard
-              name="pweanut"
-              fullName="pweanut"
-              time="0s"
-              price="$0"
-              marketCap="$4K"
-              stats={[
-                { label: "0%", color: "text-green-500" },
-                { label: "0%", color: "text-green-500" },
-                { label: "0%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="1"
-            />
-
-            <TokenCard
-              name="WHEAT"
-              fullName="WHEAT Economy"
-              time="1s"
-              price="$330"
-              marketCap="$5K"
-              stats={[
-                { label: "8%", color: "text-green-500" },
-                { label: "4%", color: "text-green-500" },
-                { label: "8%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="4"
-            />
-
-            <TokenCard
-              name="childs"
-              fullName="Judge Kim Childs"
-              time="3s"
-              price="$434"
-              marketCap="$5K"
-              stats={[
-                { label: "10%", color: "text-green-500" },
-                { label: "7%", color: "text-green-500" },
-                { label: "10%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="3"
-            />
-
-            <TokenCard
-              name="livemison"
-              fullName="For the life of my son"
-              time="5s"
-              price="$326"
-              marketCap="$5K"
-              stats={[
-                { label: "5%", color: "text-green-500" },
-                { label: "7%", color: "text-green-500" },
-                { label: "8%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="3"
-            />
-
-            <TokenCard
-              name="Weld"
-              fullName="Tig"
-              time="6s"
-              price="$391"
-              marketCap="$4K"
-              stats={[
-                { label: "5%", color: "text-green-500" },
-                { label: "3%", color: "text-green-500" },
-                { label: "5%", color: "text-red-500" },
-                { label: "0%", color: "text-green-500" },
-              ]}
-              tx="5"
-            />
-          </div>
-        </div> */}
-
-      </div >
+      </div>
     </>
-  )
+  );
 }

@@ -1,312 +1,224 @@
-"use client";
-import { VersionedTransaction, Connection, PublicKey, Keypair } from "@solana/web3.js";
-import bs58 from 'bs58'
+import { Connection } from "@solana/web3.js";
+import { subscriptionQuery, tradeQuery } from "./queries/bitquery";
 
-export type SubscriptionMethod =
-    | "subscribeNewToken"
-    | "unsubscribeNewToken"
-    | "subscribeTokenTrade"
-    | "subscribeAccountTrade";
-
-export type TokenMetadata = {
-    name: string;
-    symbol: string;
-    description: string;
-    image: string;
-    showName: boolean;
-    createdOn: string;
-    twitter: string;
-    telegram: string;
-    website: string;
-};
-
-export type TokenEvent = {
-    signature: string;
-    mint: string;
-    traderPublicKey: string;
-    txType: string;
-    initialBuy: number;
-    solAmount: number;
-    boundingCurveKey: string;
-    vTokensInBoundingCurve: number;
-    marketCapSol: number;
-    name: string;
-    uri: string;
-    pool: string;
-    symbol: string;
-    metadata: TokenMetadata;
-};
-
-export interface TradeRequest {
-    action: "buy" | "sell";
-    mint: string;
-    amount: number;
-    denominatedInSol: "true" | "false";
-    slippage: number;
-    priorityFee: number;
-    pool: "pump" | "raydium" | "auto";
+interface TokenMetadata {
+  name: string;
+  symbol: string;
+  image: string;
+  website: string;
+  twitter: string;
+  telegram: string;
+  description: string;
 }
 
-
-
-
-export interface PhantomWallet {
-    isPhantom: boolean;
-    connect: (options?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: { toString: () => string } }>;
-    publicKey?: { toString: () => string };
-    signTransaction: (tx: VersionedTransaction) => Promise<VersionedTransaction>;
-    signAndSendTransaction: (tx : VersionedTransaction) => Promise<string>;
+interface TradeData {
+  traded_volume: number;
+  traded_volume_5min: number;
+  buy_volume: number;
+  sell_volume: number;
+  trades: number;
+  makers: number;
 }
 
+interface TokenData {
+  data: any; // Replace with specific type if known
+  metadata: TokenMetadata;
+  tradeData: TradeData | null;
+}
 
-export class WebSocketClientOP {
-    private ws: WebSocket | null = null;
-    private messageQueue: { method: SubscriptionMethod; keys?: string[] }[] = [];
-    private listeners: ((data: TokenEvent) => void)[] = [];
-    private isConnected = false;
-    private reconnectAttempts = 0;
-    private readonly maxReconnectAttempts = 5;
-    private metadataCache: Record<string, TokenMetadata> = {};
-    private readonly RPC_URL = "https://api.devnet.solana.com";
-    private connection: Connection = new Connection(this.RPC_URL, "confirmed");
+export class PumpFunTokensGraphQL {
+  private readonly RPC_URL = "https://api.devnet.solana.com";
+  private connection: Connection = new Connection(this.RPC_URL, "confirmed");
+  private client: WebSocket | null = null;
+  private token = "ory_at_Dk57DxCNTjfdQWRkwIe575tJeDEJWj8hUEzwrbZW6P4._n3pyq9RK_mtFe2plYzEgO4Ihq4CeYan6to-MsWXvDA";
+  public onNewToken: ((token: TokenData) => void) | null = null;
 
-    constructor(private readonly url: string) { }
-
-    async connect(): Promise<void> {
-        if (
-            this.ws &&
-            (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)
-        ) {
-            return;
-        }
-        this.ws = new WebSocket(this.url);
-
-        this.ws.onopen = () => {
-            this.isConnected = true;
-            this.reconnectAttempts = 0;
-            this.processMessageQueue();
-        };
-
-        this.ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data) as TokenEvent;
-                this.handleIncomingData(data);
-            } catch (error) {
-                console.error("Error parsing message:", error);
-            }
-        };
-
-        this.ws.onerror = (error: Event) => {
-            console.error("WebSocket error:", error);
-        };
-
-        this.ws.onclose = () => {
-            this.isConnected = false;
-            if (this.reconnectAttempts < this.maxReconnectAttempts) {
-                setTimeout(() => {
-                    this.reconnectAttempts++;
-                    this.connect();
-                }, Math.min(1000 * this.reconnectAttempts, 5000));
-            }
-        };
+  constructor() {
+    if (typeof window !== "undefined") {
+      this.client = new WebSocket(
+        `wss://streaming.bitquery.io/eap?token=${this.token}`,
+        ["graphql-ws"]
+      );
+      this.setupConnection();
     }
+  }
 
-    addListener(callback: (data: TokenEvent) => void): void {
-        this.listeners.push(callback);
-    }
+  private setupConnection() {
+    if (!this.client) return;
 
-    removeListener(callback: (data: TokenEvent) => void): void {
-        this.listeners = this.listeners.filter((listener) => listener !== callback);
-    }
+    this.client.onopen = () => {
+      console.log("WebSocket connected to Bitquery.");
+      const initMessage = JSON.stringify({
+        type: "connection_init",
+        payload: { token: this.token },
+      });
+      this.client!.send(initMessage);
+    };
 
-    private async fetchMetadata(uri: string): Promise<TokenMetadata | null> {
-        if (this.metadataCache[uri]) {
-            return this.metadataCache[uri];
-        }
+    this.client.onerror = (event) => {
+      console.error("WebSocket error event:", event);
+    };
+
+    this.client.onclose = () => {
+      console.log("WebSocket connection closed");
+    };
+  }
+
+  private sendGraphQLRequest(query: string, variables: Record<string, unknown> = {}, id: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.client || this.client.readyState !== WebSocket.OPEN) {
+        return reject(new Error("WebSocket is not open"));
+      }
+
+      const handler = (message: MessageEvent) => {
+        let data;
         try {
-            const response = await fetch(uri);
-            const data = await response.json();
-            this.metadataCache[uri] = data;
-            return data;
-        } catch (error) {
-            console.error("Error fetching metadata:", error);
-            return null;
+          data = JSON.parse(message.data);
+        } catch (err) {
+          console.error("Error parsing message:", err);
+          return;
         }
+        if (data.id !== id) return;
+
+        if (data.type === "data") {
+          this.client!.removeEventListener("message", handler);
+          resolve(data.payload);
+        } else if (data.type === "error") {
+          this.client!.removeEventListener("message", handler);
+          reject(data.payload.errors);
+        }
+      };
+
+      this.client.addEventListener("message", handler);
+      this.client.send(
+        JSON.stringify({
+          type: "start",
+          id: id,
+          payload: { query, variables },
+        })
+      );
+    });
+  }
+
+  async fetchRTTokenData(): Promise<boolean> {
+    if (!this.client) {
+      throw new Error("WebSocket not available in this environment");
     }
 
-    private async handleIncomingData(data: TokenEvent): Promise<void> {
-        if (!this.validateTokenEvent(data)) {
-            console.warn("Received invalid token event:", data);
-            return;
-        }
-        if (data.uri) {
-            try {
-                const metadata = await this.fetchMetadata(data.uri);
-                if (metadata) {
-                    this.listeners.forEach((listener) => listener({ ...data, metadata }));
-                }
-            } catch (error) {
-                console.error("Error handling metadata:", error);
-                this.listeners.forEach((listener) => listener(data));
-            }
+    return new Promise((resolve, reject) => {
+      let isResolved = false;
+      const waitForOpen = () => {
+        if (this.client!.readyState === WebSocket.OPEN) {
+          const subscriptionMessage = JSON.stringify({
+            type: "start",
+            id: "1",
+            payload: { query: subscriptionQuery },
+          });
+          this.client!.send(subscriptionMessage);
+          console.log("Subscription message sent.");
         } else {
-            this.listeners.forEach((listener) => listener(data));
+          setTimeout(waitForOpen, 100);
         }
-    }
+      };
 
-    private validateTokenEvent(data: unknown): data is TokenEvent {
-        return (
-            !!data &&
-            typeof data === 'object' &&
-            'signature' in data && typeof data.signature === "string" &&
-            'mint' in data && typeof data.mint === "string" &&
-            'name' in data && typeof data.name === "string"
-        );
-    }
-
-    subscribeToNewTokens(): void {
-        this.send({ method: "subscribeNewToken" });
-    }
-
-    subscribeToAccountTrades(accountKeys: string[]): void {
-        this.send({ method: "subscribeAccountTrade", keys: accountKeys });
-    }
-
-    unsubscribeNewToken(): void {
-        this.send({ method: "unsubscribeNewToken" });
-    }
-
-    private send(payload: { method: SubscriptionMethod; keys?: string[] }): void {
-        if (this.isConnected && this.ws) {
-            this.ws.send(JSON.stringify(payload));
-        } else {
-            this.messageQueue.push(payload);
-        }
-    }
-
-    private processMessageQueue(): void {
-        while (this.messageQueue.length > 0 && this.isConnected) {
-            const message = this.messageQueue.shift();
-            if (message && this.ws) {
-                this.ws.send(JSON.stringify(message));
-            }
-        }
-    }
-
-    /**
-     * Sends a transaction request using the pump fun API.
-     * If a Phantom wallet is provided, it will ask the wallet to sign the transaction.
-     *
-     * @param request Trade details.
-     * @param phantomWallet Optional Phantom wallet object (window.solana).
-     */
-    async sendPumpTransaction(request: TradeRequest, phantomWallet?: PhantomWallet): Promise<void> {
-        // Use the wallet's public key if connected
-        const publicKey = phantomWallet?.publicKey?.toString();
-        if (!publicKey) {
-            console.error("No wallet connected. Please connect your Phantom wallet.");
-            return;
+      this.client!.onmessage = (event) => {
+        let response;
+        try {
+          response = JSON.parse(event.data);
+        } catch (err) {
+          console.error("Error parsing message:", err);
+          return;
         }
 
-        const response = await fetch(`https://pumpportal.fun/api/trade-local`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
+        if (response.type === "connection_ack") {
+          console.log("Connection acknowledged by server.");
+          waitForOpen();
+          if (!isResolved) {
+            isResolved = true;
+            resolve(true);
+          }
+        } else if (response.type === "data") {
+          this.latestTokenData(response.payload.data)
+            .then((data) => {
+              if (data) {
+                if (this.onNewToken) this.onNewToken(data);
+              }
+            })
+            .catch(reject);
+        } else if (response.type === "error") {
+          reject(response.payload.errors);
+        }
+      };
+
+      this.client!.onerror = (event) => reject(event);
+      this.client!.onclose = () => {
+        if (!isResolved) reject(new Error("WebSocket closed prematurely"));
+      };
+
+      setTimeout(() => {
+        if (!isResolved) reject(new Error("Connection timeout"));
+      }, 10000);
+    });
+  }
+
+  private async latestTokenData(data: unknown): Promise<TokenData | null> {
+    if (data && typeof data === "object" && "Solana" in data) {
+      const solanaData = data as { Solana: { TokenSupplyUpdates: Array<unknown> } };
+      if (solanaData.Solana.TokenSupplyUpdates.length) {
+        const latestData = solanaData.Solana.TokenSupplyUpdates[0];
+        try {
+          const metadataResponse = await fetch((latestData as any).TokenSupplyUpdate.Currency.Uri);
+          const metadata = await metadataResponse.json();
+          
+          const now = new Date();
+          const time5minAgo = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+          const time1hAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+
+          const tradeData = await this.sendGraphQLRequest(
+            tradeQuery,
+            {
+              token: (latestData as any).TokenSupplyUpdate.Currency.MintAddress,
+              time_5min_ago: time5minAgo,
+              time_1h_ago: time1hAgo,
             },
-            body: JSON.stringify({
-                publicKey,
-                action: request.action,
-                mint: request.mint,
-                denominatedInSol: request.denominatedInSol,
-                amount: request.amount,
-                slippage: request.slippage,
-                priorityFee: request.priorityFee,
-                pool: request.pool,
-            }),
-        });
-
-        if (response.ok) {
-            const data = await response.arrayBuffer();
-            const tx = VersionedTransaction.deserialize(new Uint8Array(data));
-            // Set the fee payer to the connected wallet
-            // @ts-expect-error - feePayer is not exposed in the type definition
-            tx.message.feePayer = new PublicKey(publicKey);
-            try {
-                // Ask Phantom wallet to sign the transaction
-                const signedTx = await phantomWallet!.signTransaction(tx);
-                const signature = await this.connection.sendRawTransaction(signedTx.serialize(), {
-                    preflightCommitment: "processed",
-                });
-                console.log("Transaction submitted: https://solscan.io/tx/" + signature);
-            } catch (e: unknown) {
-                const error = e instanceof Error ? e : new Error(String(e));
-                console.error("Error signing or sending transaction:", error.message);
-            }
-        } else {
-            console.error("Error generating transaction:", response.statusText);
-        }
-    }
-
-    async sendLightTransaction(request: TradeRequest) {
-        try {
-            // Use environment variable for API key
-            const apiKey = process.env.API_KEY;
-            if (!apiKey) {
-                throw new Error("API_KEY environment variable is not set");
-            }
-
-            const response = await fetch(`https://pumpportal.fun/api/trade?api-key=${apiKey}`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    action: request.action,
-                    mint: request.mint,
-                    amount: request.amount,
-                    denominatedInSol: request.denominatedInSol,
-                    slippage: request.slippage,
-                    priorityFee: request.priorityFee,
-                    pool: request.pool
-                })
-            });
-
-            if (response.status === 200) {
-                const data = await response.arrayBuffer();
-                const tx = VersionedTransaction.deserialize(new Uint8Array(data));
-                
-                // Use environment variable for private key
-                const privateKey = process.env.WALLET_PRIVATE_KEY;
-                if (!privateKey) {
-                    throw new Error("WALLET_PRIVATE_KEY environment variable is not set");
-                }
-                
-                const signerKeyPair = Keypair.fromSecretKey(bs58.decode(privateKey));
-                tx.sign([signerKeyPair]);
-                const signature = await this.connection.sendTransaction(tx);
-                console.log("Transaction: https://solscan.io/tx/" + signature);
-            } else {
-                console.error("Error generating transaction:", response.statusText);
-            }
+            "2"
+          );
+          
+          const aggregatedTradeData = (tradeData as any)?.Solana?.DEXTradeByTokens?.[0] || null;
+          return {
+            data: latestData,
+            metadata: {
+              name: metadata.name,
+              symbol: metadata.symbol,
+              image: metadata.image,
+              website: metadata.website,
+              twitter: metadata.twitter,
+              telegram: metadata.telegram,
+              description: metadata.description,
+            },
+            tradeData: aggregatedTradeData ? {
+              traded_volume: aggregatedTradeData.traded_volume || 0,
+              traded_volume_5min: aggregatedTradeData.traded_volume_5min || 0,
+              buy_volume: aggregatedTradeData.buy_volume,
+              sell_volume: aggregatedTradeData.sell_volume,
+              trades: aggregatedTradeData.trades,
+              makers: aggregatedTradeData.makers
+            } : null
+          };
         } catch (error) {
-            console.error("Error sending light transaction:", error);
+          console.error("Error processing token data:", error);
+          return null;
         }
+      }
     }
+    return null;
+  }
 
-    async fetchWalletBalance(publicKey: string): Promise<number> {
-        try {
-            const balance = await this.connection.getBalance(new PublicKey(publicKey));
-            return balance / 10 ** 9;
-        } catch (error) {
-            console.error("Error fetching wallet balance:", error);
-            return 0;
-        }
+  disconnect(): void {
+    if (this.client) {
+      this.client.send(JSON.stringify({ type: "stop", id: "1" }));
+      this.client.close();
+      console.log("WebSocket connection closed");
     }
-
-    close(): void {
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
-        }
-    }
+  }
 }

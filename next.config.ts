@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       {
         hostname: 'ipfs.io',
+      },
+      {
+        hostname: 'metadata.pumployer.fun',
       }
     ]
   }
